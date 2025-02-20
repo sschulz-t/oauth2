@@ -56,7 +56,7 @@ type Config struct {
 	// the OAuth flow, after the resource owner's URLs.
 	RedirectURL string
 
-	// Scopes specifies optional requested permissions.
+	// Scope specifies optional requested permissions.
 	Scopes []string
 
 	// authStyleCache caches which auth style to use when Endpoint.AuthStyle is
@@ -78,6 +78,7 @@ type Endpoint struct {
 	AuthURL       string
 	DeviceAuthURL string
 	TokenURL      string
+	PARURL        string
 
 	// AuthStyle optionally specifies how the endpoint wants the
 	// client ID & client secret sent. The zero value means to
@@ -183,6 +184,55 @@ func (c *Config) AuthCodeURL(state string, opts ...AuthCodeOption) string {
 	}
 	buf.WriteString(v.Encode())
 	return buf.String()
+}
+
+// PushAuthRequest sends a back-channel authorization request to the PAR endpoint and returns a URL
+// to OAuth 2.0 provider's consent page which contains a reference to the request made.
+//
+// The state parameter is used to prevent CSRF attacks. opts may include any authorization
+// request parameters as defined in RFC 6749, or any extension like PKCE (RFC 7636) or JAR (RFC 9101).
+//
+// Recommended to use over AuthCodeURL when the authorization server supports it.
+// See https://datatracker.ietf.org/doc/html/rfc9126
+func (c *Config) PushAuthRequest(ctx context.Context, state string, opts ...AuthCodeOption) (string, error) {
+	v := url.Values{
+		"response_type": {"code"},
+		"client_id":     {c.ClientID},
+	}
+	if c.RedirectURL != "" {
+		v.Set("redirect_uri", c.RedirectURL)
+	}
+	if len(c.Scopes) > 0 {
+		v.Set("scope", strings.Join(c.Scopes, " "))
+	}
+	if state != "" {
+		v.Set("state", state)
+	}
+	for _, opt := range opts {
+		opt.setValue(v)
+	}
+
+	parResponse, err := internal.RetrievePARRequestUri(ctx, c.ClientID, c.ClientSecret, c.Endpoint.PARURL, v, internal.AuthStyle(c.Endpoint.AuthStyle), c.authStyleCache.Get())
+	if err != nil {
+		if rErr, ok := err.(*internal.RetrieveError); ok {
+			return "", (*RetrieveError)(rErr)
+		}
+		return "", err
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString(c.Endpoint.AuthURL)
+	v = url.Values{
+		"client_id":   {c.ClientID},
+		"request_uri": {parResponse.RequestURI},
+	}
+	if strings.Contains(c.Endpoint.AuthURL, "?") {
+		buf.WriteByte('&')
+	} else {
+		buf.WriteByte('?')
+	}
+	buf.WriteString(v.Encode())
+	return buf.String(), nil
 }
 
 // PasswordCredentialsToken converts a resource owner username and password
@@ -393,7 +443,7 @@ func ReuseTokenSource(t *Token, src TokenSource) TokenSource {
 	}
 }
 
-// ReuseTokenSourceWithExpiry returns a TokenSource that acts in the same manner as the
+// ReuseTokenSource returns a TokenSource that acts in the same manner as the
 // TokenSource returned by ReuseTokenSource, except the expiry buffer is
 // configurable. The expiration time of a token is calculated as
 // t.Expiry.Add(-earlyExpiry).
